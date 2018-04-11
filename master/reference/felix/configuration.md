@@ -114,6 +114,19 @@ The Kubernetes datastore driver reads its configuration from Kubernetes-provided
 | ----------------------- | ----------------------- | ----------- | ------ |
 | `InterfacePrefix`       | `FELIX_INTERFACEPREFIX` | The interface name prefix that identifies workload endpoints and so distinguishes them from host endpoint interfaces. Accepts more than one interface name prefix in comma-delimited format, e.g., `tap,cali`. Note: in environments other than bare metal, the orchestrators configure this appropriately.  For example our Kubernetes and Docker integrations set the `cali` value, and our OpenStack integration sets the `tap` value. [Default: `cali`] | string |
 
+#### Felix-Typha TLS configuration
+
+{% include {{page.version}}/felix-typha-tls.md %}
+
+To use TLS, each Felix instance must have a certificate and key pair signed by
+a trusted CA.
+
+| Configuration parameter | Environment variable   | Description | Schema |
+| ----------------------- | ---------------------- | ----------- | ------ |
+| `CaCertFile`            | `FELIX_CACERTFILE`     | The full path to the certificate file for the Certificate Authority that Felix trusts for Felix-Typha communications. [Default: `/etc/ssl/certs/ca-certificates.crt`] | string |
+| `TyphaCertFile`         | `FELIX_TYPHACERTFILE`  | The full path to the certificate file for this Felix instance to use to connect to Typha. | string |
+| `TyphaKeyFile`          | `FELIX_TYPHAKEYFILE`   | The full path to the private key file for this Felix instance to use to connect to Typha. | string |
+
 Environment variables
 ---------------------
 

@@ -48,3 +48,21 @@ The full list of parameters which can be set is as follows.
 #### Kubernetes datastore configuration
 
 The Kubernetes datastore driver reads its configuration from Kubernetes-provided environment variables.
+
+#### Felix-Typha TLS configuration
+
+{% include {{page.version}}/felix-typha-tls.md %}
+
+To use TLS, each Typha instance must have a certificate and key pair signed by
+a trusted CA.  Typha then only accepts TLS connections, and requires each
+connecting client to present a certificate that is signed by the trusted CA.
+If `ClientCN` or `ClientURISAN` is configured, each client certificate must
+also have exactly that Common Name or URI SAN.
+
+| Configuration parameter | Environment variable   | Description | Schema |
+| ----------------------- | ---------------------- | ----------- | ------ |
+| `CaCertFile`            | `TYPHA_CACERTFILE`     | The full path to the certificate file for the Certificate Authority that Typha trusts for Felix-Typha communications. [Default: `/etc/ssl/certs/ca-certificates.crt`] | string |
+| `ClientCN`              | `TYPHA_CLIENTCN`       | If set, the Common Name that each connecting client certificate must have. [Default: not set] | string |
+| `ClientURISAN`          | `TYPHA_CLIENTURISAN`   | If set, a URI SAN that each connecting client certificate must have. [Default: not set] | string |
+| `ServerCertFile`        | `TYPHA_SERVERCERTFILE` | The full path to the certificate file for this Typha instance. | string |
+| `ServerKeyFile`         | `TYPHA_SERVERKEYFILE`  | The full path to the private key file for this Typha instance. | string |
