@@ -53,16 +53,21 @@ The Kubernetes datastore driver reads its configuration from Kubernetes-provided
 
 {% include {{page.version}}/felix-typha-tls.md %}
 
-To use TLS, each Typha instance must have a certificate and key pair signed by
-a trusted CA.  Typha then only accepts TLS connections, and requires each
-connecting client to present a certificate that is signed by the trusted CA.
-If `ClientCN` or `ClientURISAN` is configured, each client certificate must
-also have exactly that Common Name or URI SAN.
+To use TLS, each Typha instance must have an [X.509 SVID
+certificate](https://github.com/spiffe/spiffe/blob/master/standards/X509-SVID.md)
+signed by the trust domain CA, and the corresponding private key, and be
+configured with the [SPIFFE
+identity](https://github.com/spiffe/spiffe/blob/master/standards/SPIFFE-ID.md#2-spiffe-identity)
+that it requires its clients to have.  Then Typha will only accept TLS
+connections, and will require each connecting client to present a certificate
+that is a valid [X.509
+SVID](https://github.com/spiffe/spiffe/blob/master/standards/X509-SVID.md)
+including the required [SPIFFE
+identity](https://github.com/spiffe/spiffe/blob/master/standards/SPIFFE-ID.md#2-spiffe-identity).
 
-| Configuration parameter | Environment variable   | Description | Schema |
-| ----------------------- | ---------------------- | ----------- | ------ |
-| `CaCertFile`            | `TYPHA_CACERTFILE`     | The full path to the certificate file for the Certificate Authority that Typha trusts for Felix-Typha communications. [Default: `/etc/ssl/certs/ca-certificates.crt`] | string |
-| `ClientCN`              | `TYPHA_CLIENTCN`       | If set, the Common Name that each connecting client certificate must have. [Default: not set] | string |
-| `ClientURISAN`          | `TYPHA_CLIENTURISAN`   | If set, a URI SAN that each connecting client certificate must have. [Default: not set] | string |
-| `ServerCertFile`        | `TYPHA_SERVERCERTFILE` | The full path to the certificate file for this Typha instance. | string |
-| `ServerKeyFile`         | `TYPHA_SERVERKEYFILE`  | The full path to the private key file for this Typha instance. | string |
+| Configuration parameter | Environment variable         | Description | Schema |
+| ----------------------- | ----------------------       | ----------- | ------ |
+| `CaCertFile`            | `TYPHA_CACERTFILE`           | The full path to the certificate file for the Certificate Authority that Typha trusts for Felix-Typha communications. [Default: `/etc/ssl/certs/ca-certificates.crt`] | string |
+| `ClientSPIFFEIdentity`  | `TYPHA_CLIENTSPIFFEIDENTITY` | The SPIFFE identity that each connecting client must have.                | string |
+| `ServerSVIDFile`        | `TYPHA_SERVERSVIDFILE` 		 | The full path to the X.509 SVID certificate file for this Typha instance. | string |
+| `ServerKeyFile`         | `TYPHA_SERVERKEYFILE`  		 | The full path to the private key file for this Typha instance.            | string |
