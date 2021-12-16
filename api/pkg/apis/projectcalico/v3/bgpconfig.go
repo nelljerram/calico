@@ -80,6 +80,10 @@ type BGPConfigurationSpec struct {
 	// +kubebuilder:validation:Minimum:=1
 	// +kubebuilder:validation:Maximum:=65535
 	ListenPort uint16 `json:"listenPort,omitempty" validate:"omitempty,gt=0" confignamev1:"listen_port"`
+
+	// BindMode indicates whether to listen for BGP connections on all addresses (None)
+	// or only on the node's canonical IP address Node.Spec.BGP.IPvXAddress (NodeIP).
+	BindMode string `json:"bindMode,omitempty" validate:"omitempty,oneof=None NodeIP"`
 }
 
 // ServiceLoadBalancerIPBlock represents a single allowed LoadBalancer IP CIDR block.

@@ -43,13 +43,26 @@ router id {{if eq "hash" ($router_id) -}}
 	{{if ne "" ($router_id)}}{{$router_id}}{{else}}{{$node_ip}}{{end}};  # Use IPv4 address since router id is 4 octets, even in MP-BGP
 {{- end}}
 
+{{- $bind_mode := ""}}
+{{- if exists "/global/bind_mode" }}
+	{{- $bind_mode := getv "/global/bind_mode"}}
+{{- end}}
+
 {{- $node_listen_port_key := printf "/host/%s/listen_port" (getenv "NODENAME")}}
 {{- if exists $node_listen_port_key}}
 # Set node listen_port
-listen bgp port {{getv $node_listen_port_key}};
+{{- if eq $bind_mode "NodeIP"}}
+  listen bgp $node_ip port {{getv $node_listen_port_key}};
+{{- else}}
+  listen bgp port {{getv $node_listen_port_key}};
+{{- end}}
 {{- else if exists "/global/listen_port" }}
 # Set global listen_port
-listen bgp port {{getv "/global/listen_port"}};
+{{- if eq $bind_mode "NodeIP"}}
+  listen bgp $node_ip port {{getv "/global/listen_port"}};
+{{- else}}
+  listen bgp port {{getv "/global/listen_port"}};
+{{- end}}
 {{- end}}
 
 {{- define "LOGGING"}}
