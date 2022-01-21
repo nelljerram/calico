@@ -44,6 +44,7 @@ router id {{if eq "hash" ($router_id) -}}
 
 {{- $bind_mode := ""}}
 {{- if exists "/global/bind_mode" }}
+Hey, bind_mode exists
 	{{- $bind_mode := getv "/global/bind_mode"}}
 {{- end}}
 
