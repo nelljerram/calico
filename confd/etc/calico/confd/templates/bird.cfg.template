@@ -51,16 +51,16 @@ router id {{if eq "hash" ($router_id) -}}
 {{- if exists $node_listen_port_key}}
 # Set node listen_port
 {{- if eq $bind_mode "NodeIP"}}
-  listen bgp $node_ip port {{getv $node_listen_port_key}};
+listen bgp $node_ip port {{getv $node_listen_port_key}};
 {{- else}}
-  listen bgp port {{getv $node_listen_port_key}};
+listen bgp port {{getv $node_listen_port_key}};
 {{- end}}
 {{- else if exists "/global/listen_port" }}
 # Set global listen_port
 {{- if eq $bind_mode "NodeIP"}}
-  listen bgp $node_ip port {{getv "/global/listen_port"}};
+listen bgp $node_ip port {{getv "/global/listen_port"}};
 {{- else}}
-  listen bgp port {{getv "/global/listen_port"}};
+listen bgp port {{getv "/global/listen_port"}};
 {{- end}}
 {{- end}}
 
