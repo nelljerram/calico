@@ -16,9 +16,11 @@ package calc
 
 import (
 	"reflect"
+	"slices"
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/projectcalico/calico/felix/ip"
 	"github.com/projectcalico/calico/felix/proto"
 	"github.com/projectcalico/calico/libcalico-go/lib/apis/internalapi"
 	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
@@ -32,8 +34,15 @@ import (
 type LiveMigrationCalculator struct {
 	activeRulesCalc        *ActiveRulesCalculator
 	OnEndpointComputedData EndpointComputedDataUpdater
-	weps                   map[wepOwnerID]*wepData
-	liveMigrations         map[model.ResourceKey]internalapi.LiveMigration
+
+	// OnLiveMigrationRouteRole is called with this node's part in a live migration, for
+	// each of a local workload endpoint's addresses, whenever that changes.  The L3 route
+	// resolver needs it to decide whether to route the address to another node; see
+	// L3RouteResolver.liveMigrationOverride.  May be nil.
+	OnLiveMigrationRouteRole func(cidr ip.CIDR, role migrationRouteRole)
+
+	weps           map[wepOwnerID]*wepData
+	liveMigrations map[model.ResourceKey]internalapi.LiveMigration
 	// endpointKeys tracks LiveMigration resources that reference a specific endpoint
 	// (all four fields of wepOwnerID set).
 	endpointKeys [numSourceOrTarget]map[wepOwnerID]set.Set[model.ResourceKey]
@@ -63,6 +72,10 @@ type wepOwnerID struct {
 type wepData struct {
 	// The full WEP key.
 	key model.WorkloadEndpointKey
+
+	// The WEP's addresses, so that we can tell the L3 route resolver - which works in
+	// CIDRs, not endpoint identities - about this endpoint's live migration role.
+	cidrs []ip.CIDR
 
 	// Keys of LiveMigration resources that directly say this WEP is a live migration source or
 	// target.  Normally there should only be one LiveMigration resource mentioning a given WEP,
@@ -100,8 +113,16 @@ func (lmc *LiveMigrationCalculator) OnUpdate(update api.Update) (_ bool) {
 		exactID := wepOwnerIDFromKey(key)
 		if update.Value != nil {
 			// WEP being created or updated.
-			if lmc.weps[exactID] != nil {
-				// We already know this WEP and have done whatever is needed for it.
+			if wd := lmc.weps[exactID]; wd != nil {
+				// We already know this WEP and have done whatever is needed for its
+				// live migration role.  Its addresses can still change, though, and
+				// the route resolver is keyed on those.
+				if cidrs := wepCIDRs(update.Value); !slices.Equal(cidrs, wd.cidrs) {
+					role := lmc.routeRole(wd)
+					lmc.notifyRouteRole(wd.cidrs, lmRoleNone)
+					wd.cidrs = cidrs
+					lmc.notifyRouteRole(wd.cidrs, role)
+				}
 				return
 			}
 
@@ -109,7 +130,8 @@ func (lmc *LiveMigrationCalculator) OnUpdate(update api.Update) (_ bool) {
 
 			// First time we're seeing this WEP.
 			wd := &wepData{
-				key: key,
+				key:   key,
+				cidrs: wepCIDRs(update.Value),
 				directNameKeys: [numSourceOrTarget]set.Set[model.ResourceKey]{
 					set.New[model.ResourceKey](),
 					set.New[model.ResourceKey](),
@@ -133,7 +155,11 @@ func (lmc *LiveMigrationCalculator) OnUpdate(update api.Update) (_ bool) {
 		} else {
 			logrus.WithField("wep", exactID).Debug("LiveMigrationCalculator: WEP deleted")
 			// Don't need anything here to "reset the role that we previously said"
-			// because the WEP is being deleted anyway.
+			// because the WEP is being deleted anyway.  The route resolver does need
+			// telling, though: it keys on CIDR, and a CIDR outlives any one endpoint.
+			if wd := lmc.weps[exactID]; wd != nil {
+				lmc.notifyRouteRole(wd.cidrs, lmRoleNone)
+			}
 			delete(lmc.weps, exactID)
 		}
 	case model.ResourceKey:
@@ -490,7 +516,49 @@ func (lmc *LiveMigrationCalculator) withRoleUpdateIfNeeded(wepData *wepData, upd
 			"uid":  newUID,
 		}).Info("LiveMigrationCalculator: emitting role for WEP")
 		lmc.OnEndpointComputedData(wepData.key, EPCompDataKindLiveMigration, &liveMigrationRole{role: newRole, uid: newUID})
+		lmc.notifyRouteRole(wepData.cidrs, lmc.routeRole(wepData))
 	}
+}
+
+// routeRole maps this endpoint's live migration role onto what the L3 route resolver needs
+// to know about it.
+func (lmc *LiveMigrationCalculator) routeRole(wd *wepData) migrationRouteRole {
+	role, _ := lmc.liveMigrationRoleAndUID(wd)
+	switch role {
+	case proto.LiveMigrationRole_SOURCE:
+		return lmRoleSource
+	case proto.LiveMigrationRole_TARGET:
+		return lmRoleTarget
+	default:
+		return lmRoleNone
+	}
+}
+
+func (lmc *LiveMigrationCalculator) notifyRouteRole(cidrs []ip.CIDR, role migrationRouteRole) {
+	if lmc.OnLiveMigrationRouteRole == nil {
+		return
+	}
+	for _, cidr := range cidrs {
+		lmc.OnLiveMigrationRouteRole(cidr, role)
+	}
+}
+
+// wepCIDRs extracts a workload endpoint's addresses as CIDRs.
+func wepCIDRs(value any) []ip.CIDR {
+	wep, ok := value.(*model.WorkloadEndpoint)
+	if !ok {
+		logrus.WithField("value", value).Warn(
+			"LiveMigrationCalculator: unexpected WorkloadEndpoint value type")
+		return nil
+	}
+	cidrs := make([]ip.CIDR, 0, len(wep.IPv4Nets)+len(wep.IPv6Nets))
+	for _, n := range wep.IPv4Nets {
+		cidrs = append(cidrs, ip.CIDRFromCalicoNet(n))
+	}
+	for _, n := range wep.IPv6Nets {
+		cidrs = append(cidrs, ip.CIDRFromCalicoNet(n))
+	}
+	return cidrs
 }
 
 const EPCompDataKindLiveMigration = EndpointComputedDataKind("LiveMigration")

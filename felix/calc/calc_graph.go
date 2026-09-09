@@ -441,6 +441,13 @@ func NewCalculationGraph(
 		l3RR.RegisterWith(allUpdDispatcher, localEndpointDispatcher)
 		l3RR.OnAlive = liveCallback
 		cg.l3RouteResolver = l3RR
+
+		// The L3 resolver works in CIDRs and has no idea about LiveMigration
+		// resources; the live migration calculator is what correlates the two, so it
+		// tells the resolver which of our local addresses are being migrated, and in
+		// which direction.  Everything else the resolver needs about a migration -
+		// most importantly, whether it has cut over yet - it gets from IPAM.
+		cg.liveMigrationCalculator.OnLiveMigrationRouteRole = l3RR.onLiveMigrationRoleUpdate
 	}
 
 	// Calculate VXLAN routes.

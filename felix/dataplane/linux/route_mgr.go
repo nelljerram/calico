@@ -68,6 +68,10 @@ type routeManager struct {
 	dpConfig      Config
 	routeProtocol netlink.RouteProtocol
 
+	// FIB priorities ("metrics") for the routes we program, for this IP version.
+	normalRoutePriority   int
+	elevatedRoutePriority int
+
 	// Log context
 	logCtx     *logrus.Entry
 	opRecorder logrusr.OpRecorder
@@ -93,22 +97,24 @@ func newRouteManager(
 	nlHandle netlinkshim.Interface,
 ) *routeManager {
 	return &routeManager{
-		hostname:             dpConfig.Hostname,
-		routeTable:           mainRouteTable,
-		routeClassTunnel:     routeClassTunnel,
-		routeClassSameSubnet: routeClassSameSubnet,
-		routeClassBlackhole:  blackholeRouteClass(ippoolType),
-		routesByDest:         map[string]*proto.RouteUpdate{},
-		localIPAMBlocks:      map[string]*proto.RouteUpdate{},
-		tunnelChangedC:       make(chan struct{}, 1),
-		tunnelDevice:         tunnelDevice,
-		tunnelDeviceMTU:      mtu,
-		ipVersion:            ipVersion,
-		ippoolType:           ippoolType,
-		dpConfig:             dpConfig,
-		nlHandle:             nlHandle,
-		routeProtocol:        calculateRouteProtocol(dpConfig),
-		opRecorder:           opRecorder,
+		hostname:              dpConfig.Hostname,
+		routeTable:            mainRouteTable,
+		routeClassTunnel:      routeClassTunnel,
+		routeClassSameSubnet:  routeClassSameSubnet,
+		routeClassBlackhole:   blackholeRouteClass(ippoolType),
+		routesByDest:          map[string]*proto.RouteUpdate{},
+		localIPAMBlocks:       map[string]*proto.RouteUpdate{},
+		tunnelChangedC:        make(chan struct{}, 1),
+		tunnelDevice:          tunnelDevice,
+		tunnelDeviceMTU:       mtu,
+		ipVersion:             ipVersion,
+		ippoolType:            ippoolType,
+		dpConfig:              dpConfig,
+		nlHandle:              nlHandle,
+		routeProtocol:         calculateRouteProtocol(dpConfig),
+		opRecorder:            opRecorder,
+		normalRoutePriority:   normalRoutePriorityForVersion(dpConfig, ipVersion),
+		elevatedRoutePriority: elevatedRoutePriorityForVersion(dpConfig, ipVersion),
 		logCtx: logrus.WithFields(logrus.Fields{
 			"ipVersion":    ipVersion,
 			"tunnelDevice": tunnelDevice,
@@ -185,7 +191,7 @@ func (m *routeManager) OnUpdate(protoBufMsg any) {
 		m.deleteRoute(msg.Dst)
 
 		// Process remote IPAM blocks.
-		if isType(msg, proto.RouteType_REMOTE_WORKLOAD) && msg.IpPoolType == m.ippoolType {
+		if isRemoteWorkload(msg) && msg.IpPoolType == m.ippoolType {
 			m.logCtx.WithField("msg", msg).Debug("Route manager received route update")
 			m.routesByDest[msg.Dst] = msg
 			m.routesDirty = true
@@ -261,6 +267,12 @@ func (m *routeManager) vxlanEnabled() bool {
 
 func isType(msg *proto.RouteUpdate, t proto.RouteType) bool {
 	return msg.Types&t == t
+}
+
+// A borrowed IP is flagged both local and remote; LocalWorkload is the calc
+// graph's tie-break and wins.
+func isRemoteWorkload(msg *proto.RouteUpdate) bool {
+	return isType(msg, proto.RouteType_REMOTE_WORKLOAD) && !msg.LocalWorkload
 }
 
 func (m *routeManager) routeIsLocalBlock(msg *proto.RouteUpdate) bool {
@@ -386,11 +398,19 @@ func (m *routeManager) updateRoutes() {
 			continue
 		}
 
+		// Every route we program gets an explicit priority.  The calculation graph tells
+		// us which band; the band's actual metric is our own configuration.  Stamping it
+		// here rather than in the route builders keeps the two kinds of route consistent
+		// and means a builder cannot forget.
+		priority := m.routePriority(r)
+
 		if noEncapRoute := m.noEncapRoute(cidr, r); noEncapRoute != nil {
 			// We've got everything we need to program this route as a no-encap route.
+			noEncapRoute.Priority = priority
 			noEncapRoutes = append(noEncapRoutes, *noEncapRoute)
 			logCtx.WithField("route", r).Debug("Destination in same subnet, using no-encap route.")
 		} else if tunnelRoute := m.tunnelRouteFn(cidr, r); tunnelRoute != nil {
+			tunnelRoute.Priority = priority
 			tunnelRoutes = append(tunnelRoutes, *tunnelRoute)
 			logCtx.WithField("route", tunnelRoute).Debug("adding tunnel route to list for addition")
 		} else {
@@ -418,6 +438,34 @@ func (m *routeManager) updateRoutes() {
 
 func (m *routeManager) setTunnelRouteFunc(fn func(ip.CIDR, *proto.RouteUpdate) *routetable.Target) {
 	m.tunnelRouteFn = fn
+}
+
+// routePriority returns the FIB priority ("metric") to program a route with.
+//
+// Leaving Priority unset - which is what we used to do - means metric 0 on IPv4, and metric
+// 0 beats everything, including the elevated local workload route that the endpoint manager
+// programs on the target of a live migration.  IPv6 escaped that by accident, because the
+// kernel treats priority 0 on IPv6 as "use the default" and RouteTable normalises it to
+// 1024.  So be explicit, for both families.
+func (m *routeManager) routePriority(r *proto.RouteUpdate) int {
+	if r.Priority == proto.RoutePriority_ELEVATED {
+		return m.elevatedRoutePriority
+	}
+	return m.normalRoutePriority
+}
+
+func normalRoutePriorityForVersion(dpConfig Config, ipVersion uint8) int {
+	if ipVersion == 6 {
+		return dpConfig.IPv6NormalRoutePriority
+	}
+	return dpConfig.IPv4NormalRoutePriority
+}
+
+func elevatedRoutePriorityForVersion(dpConfig Config, ipVersion uint8) int {
+	if ipVersion == 6 {
+		return dpConfig.IPv6ElevatedRoutePriority
+	}
+	return dpConfig.IPv4ElevatedRoutePriority
 }
 
 func blackholeRoutes(localIPAMBlocks map[string]*proto.RouteUpdate, proto netlink.RouteProtocol) []routetable.Target {

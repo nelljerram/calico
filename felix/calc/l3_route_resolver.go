@@ -69,6 +69,16 @@ type L3RouteResolver struct {
 	workloadIDToCIDRs  map[model.WorkloadEndpointKey][]cnet.IPNet
 	routeSource        string
 
+	// liveMigrationRoles records, per address, this node's part in an in-progress live
+	// migration of the workload that owns that address.  It is only ever populated for
+	// addresses of *local* workloads, so an entry exists on a migration's source node and
+	// on its target node, and nowhere else.
+	//
+	// Note what is deliberately absent: we are never told when the migration cuts over.
+	// IPAM already carries that, because the allocation's owner moves to the target node
+	// when the workload goes live there, and that reaches every node as a block update.
+	liveMigrationRoles map[ip.CIDR]migrationRouteRole
+
 	OnAlive        func()
 	lastLiveReport time.Time
 }
@@ -184,6 +194,7 @@ func NewL3RouteResolver(hostname string, callbacks routeCallbacks, routeSource s
 		allPools:           map[string]l3rrPoolInfo{},
 		workloadIDToCIDRs:  map[model.WorkloadEndpointKey][]cnet.IPNet{},
 		routeSource:        routeSource,
+		liveMigrationRoles: map[ip.CIDR]migrationRouteRole{},
 		nodeRoutes:         newNodeRoutes(),
 	}
 	l3rr.trie.OnAlive = l3rr.maybeReportLive
@@ -800,6 +811,14 @@ func (c *L3RouteResolver) flush() {
 				// sharing the same CIDR. However, there are rare transient cases we must handle where we may have
 				// multiple workload, or workload and tunnel, or multiple node Refs with the same IP. Since this will be
 				// transient, we can always just use the first entry (and related tunnel entries)
+
+				// Whatever the IPAM data said before we let the Refs speak.  Block
+				// entries are visited least-specific-first, so for a /32 with its own
+				// allocation entry this is the node that owns the allocation, which is
+				// what a completed live migration updates.  (blockNodeName, in contrast,
+				// deliberately holds the *first* block seen, for the Borrowed check.)
+				ipamNode := rt.DstNodeName
+
 				rt.DstNodeName = ri.Refs[0].NodeName
 				if blockSeen && blockNodeName != rt.DstNodeName {
 					logCxt.Debug("Borrowed ref IP")
@@ -813,6 +832,35 @@ func (c *L3RouteResolver) flush() {
 						// (which get flagged as both local and remote!).
 						rt.LocalWorkload = true
 						rt.Types |= proto.RouteType_LOCAL_WORKLOAD
+
+						// A live migration is the one case in which a live local
+						// workload endpoint is *not* the authority on where its own
+						// address lives: once the migration has cut over, the workload
+						// is running on the other node and IPAM says so, while our
+						// local endpoint lingers until the orchestrator tears it down.
+						// Follow IPAM in that case, so that we route to where the
+						// workload actually is.  See liveMigrationOverride.
+						if node, prio, ok := c.liveMigrationOverride(cidr, ipamNode); ok {
+							logCxt.WithFields(logrus.Fields{
+								"node":     node,
+								"priority": prio,
+							}).Debug("Live migration cut over; routing local address to remote node")
+							rt.DstNodeName = node
+							rt.Types |= proto.RouteType_REMOTE_WORKLOAD
+							rt.Priority = prio
+
+							// LocalWorkload states that *this* node owns the
+							// address, and it is what the dataplane uses to break
+							// the tie when both workload type bits are set (see
+							// isRemoteWorkload in route_mgr.go, and the
+							// GetLocalWorkload branch in bpf_route_mgr.go).  We no
+							// longer own it, so clear it - otherwise the remote
+							// route we just asked for would be suppressed as if
+							// this were a borrowed IP.  The type bits stay as they
+							// are: they remain factually true, and the bool is the
+							// tie-break.
+							rt.LocalWorkload = false
+						}
 					} else {
 						rt.Types |= proto.RouteType_REMOTE_WORKLOAD
 					}
@@ -893,6 +941,94 @@ func (c *L3RouteResolver) flush() {
 
 		c.trie.dirtyCIDRs.Discard(cidr)
 	}
+}
+
+// migrationRouteRole is this node's part in an in-progress live migration of the workload
+// that owns a particular address.
+type migrationRouteRole int
+
+const (
+	lmRoleNone migrationRouteRole = iota
+	lmRoleSource
+	lmRoleTarget
+)
+
+func (r migrationRouteRole) String() string {
+	switch r {
+	case lmRoleSource:
+		return "Source"
+	case lmRoleTarget:
+		return "Target"
+	default:
+		return "None"
+	}
+}
+
+// onLiveMigrationRoleUpdate records that this node's local workload endpoint for cidr is the
+// source or the target of an in-progress live migration, or - with lmRoleNone - that it is
+// no longer either.  Called by the LiveMigrationCalculator, which is what correlates local
+// workload endpoints with LiveMigration resources.
+func (c *L3RouteResolver) onLiveMigrationRoleUpdate(cidr ip.CIDR, role migrationRouteRole) {
+	if c.liveMigrationRoles[cidr] == role {
+		return
+	}
+	logrus.WithFields(logrus.Fields{
+		"cidr": cidr,
+		"role": role,
+	}).Info("L3RouteResolver: live migration role for local address")
+	if role == lmRoleNone {
+		delete(c.liveMigrationRoles, cidr)
+	} else {
+		c.liveMigrationRoles[cidr] = role
+	}
+	// The route for this CIDR may now resolve to a different node, or a different priority.
+	c.trie.MarkCIDRDirty(cidr)
+	c.flush()
+}
+
+// liveMigrationOverride decides whether a local workload's address should be routed to
+// another node because the workload has been live migrated there, and at what FIB priority.
+// ipamNode is what the IPAM data says owns the address.
+//
+// It returns ok=false when there is no migration for this address, or when IPAM still agrees
+// the address is ours - which is the case right up until cutover.
+//
+// Note the relationship with a borrowed IP, which produces the same pair of workload type
+// bits for a quite different reason: there, the *block* belongs to another node but the
+// allocation is ours, so we own the address and must keep routing it locally.  Here, the
+// allocation itself has moved, so we do not.  Ownership - carried by RouteUpdate's
+// LocalWorkload field - is what separates the two cases, and the caller clears it here.
+//
+// The priority differs by role, and that difference is the whole reason for having two
+// bands:
+//
+//   - On the source node our own local workload route sits at normal priority, because a
+//     migration source is never elevated.  So the route to the target has to be ELEVATED in
+//     order to beat it, and that is what moves traffic off the local tap.
+//   - On the target node our own local workload route is already elevated by the endpoint
+//     manager once the migration goes live.  So the route back to the source must stay at
+//     NORMAL.  Elevating both would give them the same CIDR *and* the same metric, hence
+//     the same routetable.RouteKey; RouteTable would then apply its route-class
+//     tie-breaker, keep the local workload route and silently drop the remote one.
+func (c *L3RouteResolver) liveMigrationOverride(
+	cidr ip.CIDR,
+	ipamNode string,
+) (node string, priority proto.RoutePriority, ok bool) {
+	role := c.liveMigrationRoles[cidr]
+	if role == lmRoleNone {
+		return "", proto.RoutePriority_NORMAL, false
+	}
+	if ipamNode == "" || ipamNode == c.myNodeName {
+		// IPAM still says the address is ours, so the workload has not gone live
+		// elsewhere yet.  Note that with RouteSource=WorkloadIPs there is no IPAM data at
+		// all, so we never get past here; closing that gap needs an explicit cutover
+		// indication on the LiveMigration resource.
+		return "", proto.RoutePriority_NORMAL, false
+	}
+	if role == lmRoleSource {
+		return ipamNode, proto.RoutePriority_ELEVATED, true
+	}
+	return ipamNode, proto.RoutePriority_NORMAL, true
 }
 
 // nodeInOurSubnet returns true if the IP of the given node is known and it's in our subnet.

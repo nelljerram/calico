@@ -618,6 +618,20 @@ enum IPPoolType {
   IPIP = 3;
 }
 
+// RoutePriority selects which FIB priority band ("metric") the dataplane
+// programs a route in.  The numbers themselves are dataplane configuration
+// (IPv4/IPv6NormalRoutePriority and IPv4/IPv6ElevatedRoutePriority), so the
+// calculation graph names only the band.  NORMAL is the zero value, so a
+// route that says nothing about priority gets the ordinary metric.
+enum RoutePriority {
+  NORMAL = 0;
+  // ELEVATED means this route has to win against a local workload route for
+  // the same CIDR that this same node is also programming.  It is set on the
+  // remote route for a live-migrated workload, on the migration's source
+  // node, from cutover until the source workload endpoint goes away.
+  ELEVATED = 1;
+}
+
 message TunnelType {
   bool ipip = 1;
   bool vxlan = 2;
@@ -640,9 +654,20 @@ message RouteUpdate {
   string dst_node_ip = 5;
   bool same_subnet = 7;
   bool nat_outgoing = 8;
+  // LocalWorkload says that *this* node owns dst, so the dataplane must route
+  // it to a local workload interface and must not program a remote route for
+  // it.  It is the tie-break between the two workload bits in types, which are
+  // both set whenever dst sits inside another node's IPAM block, and it means
+  // ownership rather than mere existence of a local endpoint: on the source
+  // node of a live migration, after cutover, a local workload endpoint still
+  // exists but IPAM has moved ownership to the target node, so this is false
+  // and the remote route wins.
   bool local_workload = 9;
   TunnelType tunnel_type = 10;
   bool borrowed = 11;
+  // Priority is the FIB priority band that the dataplane should program this
+  // route in.  See RoutePriority.
+  RoutePriority priority = 13;
 }
 
 message RouteRemove {

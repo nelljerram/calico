@@ -55,6 +55,7 @@ type RouteUpdate struct {
 	LocalWorkload bool
 	TunnelType    *proto.TunnelType
 	Borrowed      bool
+	Priority      proto.RoutePriority
 }
 
 func ProtoToVXLANTunnelEndpointUpdate(msg *proto.VXLANTunnelEndpointUpdate) VXLANTunnelEndpointUpdate {
@@ -97,5 +98,6 @@ func ProtoToRouteUpdate(msg *proto.RouteUpdate) RouteUpdate {
 		LocalWorkload: msg.LocalWorkload,
 		TunnelType:    msg.TunnelType,
 		Borrowed:      msg.Borrowed,
+		Priority:      msg.Priority,
 	}
 }
